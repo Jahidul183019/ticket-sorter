@@ -15,11 +15,11 @@ text, so the demo runs offline.
 
 ## Endpoints
 
-| Method | Path           | Purpose                                          |
-| ------ | -------------- | ------------------------------------------------ |
-| GET    | `/health`      | Liveness probe (`{"status":"ok", ...}`)         |
-| POST   | `/sort-ticket` | Classify a customer message and return routing   |
-| GET    | `/docs`        | Auto-generated Swagger UI                       |
+| Method | Path           | Purpose                                        |
+| ------ | -------------- | ---------------------------------------------- |
+| GET    | `/health`      | Liveness probe (`{"status":"ok", ...}`)        |
+| POST   | `/sort-ticket` | Classify a customer message and return routing |
+| GET    | `/docs`        | Auto-generated Swagger UI                      |
 
 ### `POST /sort-ticket`
 
@@ -41,13 +41,14 @@ Response:
   "severity": "high",
   "department": "dispute_resolution",
   "agent_summary": "Customer reports sending money to the wrong number/account and is requesting recovery of the transferred amount.",
-  "human_review_required": true,
+  "human_review_required": false,
   "confidence": 0.85
 }
 ```
 
-`human_review_required` is `true` when `severity = "critical"` or
-`case_type = "phishing_or_social_engineering"`.
+`human_review_required` is `true` **only** when `severity = "critical"` or
+`case_type = "phishing_or_social_engineering"`. A `severity = "high"` case
+such as a wrong transfer does **not** trigger human review on its own.
 
 ## How classification works
 
@@ -92,15 +93,17 @@ from the spec's fixed tables.
 
 ### Human review rule
 
-`human_review_required = severity == "critical"` OR
-`case_type == "phishing_or_social_engineering"`.
+`human_review_required = true` **only if**:
+- `severity == "critical"` (phishing cases), OR
+- `case_type == "phishing_or_social_engineering"`
+
+All other cases — including `high` severity — return `human_review_required: false`.
 
 ### Safety rule
 
 `agent_summary` is **never** allowed to contain the words `PIN`, `OTP`,
-`password`, or `card number` (plus `cvv` / `cvc` for belt-and-suspenders).
-The classifier runs a regex pass on the summary before returning it and
-redacts any forbidden tokens.
+`password`, `card number`, `cvv`, or `cvc`. The classifier runs a regex pass
+on the summary before returning it and redacts any forbidden tokens.
 
 ## Project layout
 
@@ -135,8 +138,10 @@ Open <http://localhost:8000/docs> for the Swagger UI.
 ### 3. Quick smoke test
 
 ```bash
+# Health check
 curl -s http://localhost:8000/health | jq
 
+# Case 1: wrong transfer → high severity, human_review_required: false
 curl -s -X POST http://localhost:8000/sort-ticket \
   -H 'Content-Type: application/json' \
   -d '{
@@ -144,6 +149,7 @@ curl -s -X POST http://localhost:8000/sort-ticket \
         "message": "I sent 5000 taka to a wrong number by mistake."
       }' | jq
 
+# Case 2: phishing → critical severity, human_review_required: true
 curl -s -X POST http://localhost:8000/sort-ticket \
   -H 'Content-Type: application/json' \
   -d '{
@@ -151,11 +157,28 @@ curl -s -X POST http://localhost:8000/sort-ticket \
         "message": "Someone called me and asked for my OTP to verify my bKash account."
       }' | jq
 
+# Case 3: payment failed → high severity, human_review_required: false
 curl -s -X POST http://localhost:8000/sort-ticket \
   -H 'Content-Type: application/json' \
   -d '{
         "ticket_id": "T-003",
         "message": "My payment failed but money was deducted from my account."
+      }' | jq
+
+# Case 4: refund request → low severity, human_review_required: false
+curl -s -X POST http://localhost:8000/sort-ticket \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "ticket_id": "T-004",
+        "message": "Please refund my last transaction, I changed my mind."
+      }' | jq
+
+# Case 5: other → low severity, human_review_required: false
+curl -s -X POST http://localhost:8000/sort-ticket \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "ticket_id": "T-005",
+        "message": "App crashed when I opened it."
       }' | jq
 ```
 
@@ -163,7 +186,6 @@ curl -s -X POST http://localhost:8000/sort-ticket \
 
 ```bash
 docker build -t ticket-sorter .
-
 docker run --rm -p 8000:8000 ticket-sorter
 ```
 
@@ -171,111 +193,18 @@ No env vars required — the classifier is fully offline.
 
 ## Configuration
 
-| Env var     | Required | Default | Notes                                |
-| ----------- | -------- | ------- | ------------------------------------ |
-| `LOG_LEVEL` | no       | `INFO`  | `DEBUG`, `INFO`, `WARNING`, `ERROR`  |
-
-## Deploying to Render
-
-Render can run this service directly from the `Dockerfile` — no buildpack
-or `render.yaml` is needed. **Option A (dashboard) is the recommended path**;
-Option B is for infra-as-code fans.
-
-### Option A — one-click from the Render dashboard (recommended)
-
-The repo is already on GitHub: **https://github.com/Jahidul183019/ticket-sorter**.
-
-1. Sign in at <https://dashboard.render.com> (the green **Sign in with GitHub**
-   button is fine).
-2. In the top-right click **New + → Web Service**.
-3. On the *Connect a repository* screen:
-   - In the repo list, find **Jahidul183019/ticket-sorter** (you may need to
-     click **Configure account** once to grant Render access to your GitHub
-     repos).
-   - Click **Connect** next to it.
-4. On the *Configure service* form, set these fields exactly:
-
-   | Field                | Value                                                |
-   | -------------------- | ---------------------------------------------------- |
-   | **Name**             | `ticket-sorter` (this becomes the URL subdomain)     |
-   | **Region**           | `Singapore` (lowest latency from Bangladesh)          |
-   | **Branch**           | `main`                                               |
-   | **Runtime**          | `Docker`                                             |
-   | **Instance type**    | `Free`                                               |
-   | **Health check path**| `/health`                                            |
-
-   Everything else on the form can stay at its default.
-5. **Environment** — skip it. The classifier is fully offline; there are no
-   required env vars. (You may optionally add `LOG_LEVEL=INFO` for nicer logs.)
-6. Click **Create Web Service**. The first build takes ~2-3 minutes while
-   Render pulls the `python:3.12-slim` base, installs `requirements.txt`, and
-   starts `uvicorn`.
-
-   When the status flips to **Live** you'll have a URL like
-   `https://ticket-sorter.onrender.com`. Swagger UI is at `/docs`.
-
-### Verifying the deploy
-
-Once Render shows the service as **Live**, smoke test from any terminal:
-
-```bash
-SERVICE=https://ticket-sorter.onrender.com   # replace with your URL
-
-curl -s $SERVICE/health | jq
-
-curl -s -X POST $SERVICE/sort-ticket \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "ticket_id": "T-001",
-        "message": "I sent 5000 taka to a wrong number by mistake."
-      }' | jq
-```
-
-You should see `wrong_transfer` / `high` / `dispute_resolution` in the JSON
-response, with `human_review_required: true` because `severity = "high"`.
-
-### Option B — Blueprint (`render.yaml`) [optional]
-
-If you'd rather not click through the dashboard, drop a `render.yaml` next to
-the `Dockerfile`:
-
-```yaml
-services:
-  - type: web
-    name: ticket-sorter
-    runtime: docker
-    plan: free
-    healthCheckPath: /health
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-```
-
-Then in the dashboard choose **New + → Blueprint**, point it at the repo, and
-Render will read the file and create the service for you.
-
-### Render gotchas to know about
-
-- **Free tier sleeps after 15 min of inactivity** — the first request after a
-  sleep takes ~30 s. Keep it warm with a cron ping (e.g. an external
-  `cron-job.org` job hitting `/health` every 10 min) or upgrade to the
-  `CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`
-  hard-codes `8000`, which works because Render also exposes `8000` for Docker
-  services. If you switch to a buildpack later, change it to read `PORT` from
-  the env, e.g. `uvicorn main:app --host 0.0.0.0 --port $PORT`.
-- **No env files needed** — the classifier is fully offline, so there is
-  nothing to put in Render's **Environment** tab.
-- **Logs**: Render's **Logs** tab streams the same `LOG_LEVEL` output the
-  container writes to stdout, so `LOG_LEVEL=DEBUG` is useful when debugging a
-  new keyword list.
+| Env var     | Required | Default | Notes                               |
+| ----------- | -------- | ------- | ----------------------------------- |
+| `LOG_LEVEL` | no       | `INFO`  | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ## Notes for the hackathon
 
 - Classification is **deterministic and synchronous**: same input → same output,
-  every time. No cold starts, no rate limits, no network.
-- `confidence` reflects how strong the keyword match was
-  (`0.9` for phishing, `0.85` for wrong-transfer / payment-failed,
-  `0.8` for refund, `0.5` for `other`).
-- The keyword lists live in `classifier.py` at the top — easy to extend
-  during the demo without restarting anything.
-- The safety filter is implemented as a regex pass over the generated
-  summary; it always runs even though there is no LLM to violate it.
+  every time. No cold starts, no rate limits, no network dependency.
+- `confidence` reflects keyword match strength: `0.9` for phishing, `0.85` for
+  wrong-transfer / payment-failed, `0.8` for refund, `0.5` for `other`.
+- The keyword lists live at the top of `classifier.py` — easy to extend during
+  the demo without restarting.
+- The safety filter (regex redaction of PIN/OTP/password/card number) always
+  runs even though there is no LLM to violate it.
+- **LLM used:** No.
