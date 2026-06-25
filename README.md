@@ -8,6 +8,11 @@ payments ops, or fraud risk — using pure Python keyword rules.
 **No LLM. No API key. No external calls.** Just if/elif/else on the message
 text, so the demo runs offline.
 
+> Built as a submission for the **SUST CSE Preliminary Mock Contest** — a
+> take-home style build where reliability and demo-readiness matter more than
+> model nuance. The whole service is offline, deterministic, and boots in
+> under a second on the free tier of any host.
+
 ## Endpoints
 
 | Method | Path           | Purpose                                          |
@@ -173,43 +178,41 @@ No env vars required — the classifier is fully offline.
 ## Deploying to Render
 
 Render can run this service directly from the `Dockerfile` — no buildpack
-or `render.yaml` is needed.
+or `render.yaml` is needed. **Option A (dashboard) is the recommended path**;
+Option B is for infra-as-code fans.
 
-### Option A: One-click from the dashboard
+### Option A — one-click from the Render dashboard (recommended)
 
-1. Push the repo to GitHub and sign in at <https://dashboard.render.com>.
-2. Click **New + → Web Service**, then pick **"Build and deploy from a Git repository"**.
-3. Select the `PoishaGo` repo and the `ticket-sorter` (or root) directory.
-4. On the create form set:
-   - **Runtime**: `Docker`
-   - **Region**: any (e.g. `Singapore` for low latency in BD)
-   - **Instance type**: `Free` is fine for a demo
-   - **Health check path**: `/health`
-5. Skip the **Environment** section — there are no required env vars. You can
-   optionally add `LOG_LEVEL=INFO`.
-6. Click **Create Web Service**. The first build uses the `Dockerfile` in this
-   repo (`python:3.12-slim` → `pip install -r requirements.txt` → `uvicorn`).
+The repo is already on GitHub: **https://github.com/Jahidul183019/ticket-sorter**.
 
-   Render will auto-assign a URL like `https://ticket-sorter.onrender.com`.
-   Swagger UI is served at `/docs`.
+1. Sign in at <https://dashboard.render.com> (the green **Sign in with GitHub**
+   button is fine).
+2. In the top-right click **New + → Web Service**.
+3. On the *Connect a repository* screen:
+   - In the repo list, find **Jahidul183019/ticket-sorter** (you may need to
+     click **Configure account** once to grant Render access to your GitHub
+     repos).
+   - Click **Connect** next to it.
+4. On the *Configure service* form, set these fields exactly:
 
-### Option B: Blueprint (`render.yaml`)
+   | Field                | Value                                                |
+   | -------------------- | ---------------------------------------------------- |
+   | **Name**             | `ticket-sorter` (this becomes the URL subdomain)     |
+   | **Region**           | `Singapore` (lowest latency from Bangladesh)          |
+   | **Branch**           | `main`                                               |
+   | **Runtime**          | `Docker`                                             |
+   | **Instance type**    | `Free`                                               |
+   | **Health check path**| `/health`                                            |
 
-If you prefer infra-as-code, drop a `render.yaml` next to the `Dockerfile`:
+   Everything else on the form can stay at its default.
+5. **Environment** — skip it. The classifier is fully offline; there are no
+   required env vars. (You may optionally add `LOG_LEVEL=INFO` for nicer logs.)
+6. Click **Create Web Service**. The first build takes ~2-3 minutes while
+   Render pulls the `python:3.12-slim` base, installs `requirements.txt`, and
+   starts `uvicorn`.
 
-```yaml
-services:
-  - type: web
-    name: ticket-sorter
-    runtime: docker
-    plan: free
-    healthCheckPath: /health
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-```
-
-Then in the dashboard choose **New + → Blueprint**, point it at the repo, and
-Render will read the file and create the service for you.
+   When the status flips to **Live** you'll have a URL like
+   `https://ticket-sorter.onrender.com`. Swagger UI is at `/docs`.
 
 ### Verifying the deploy
 
@@ -228,13 +231,33 @@ curl -s -X POST $SERVICE/sort-ticket \
       }' | jq
 ```
 
+You should see `wrong_transfer` / `high` / `dispute_resolution` in the JSON
+response, with `human_review_required: true` because `severity = "high"`.
+
+### Option B — Blueprint (`render.yaml`) [optional]
+
+If you'd rather not click through the dashboard, drop a `render.yaml` next to
+the `Dockerfile`:
+
+```yaml
+services:
+  - type: web
+    name: ticket-sorter
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+```
+
+Then in the dashboard choose **New + → Blueprint**, point it at the repo, and
+Render will read the file and create the service for you.
+
 ### Render gotchas to know about
 
 - **Free tier sleeps after 15 min of inactivity** — the first request after a
-  sleep takes ~30 s. Keep it warm with a cron ping or upgrade to the
-  `Starter` plan for always-on.
-- **Port binding**: Render injects `PORT` (defaults to `10000`) and expects the
-  app to bind to `0.0.0.0:$PORT`. The `Dockerfile`'s
+  sleep takes ~30 s. Keep it warm with a cron ping (e.g. an external
+  `cron-job.org` job hitting `/health` every 10 min) or upgrade to the
   `CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`
   hard-codes `8000`, which works because Render also exposes `8000` for Docker
   services. If you switch to a buildpack later, change it to read `PORT` from
