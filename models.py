@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -45,6 +45,14 @@ class SortTicketRequest(BaseModel):
         min_length=1,
         max_length=128,
         description="Unique ticket identifier (e.g. 'T-001').",
+    )
+    channel: Optional[str] = Field(
+        default=None,
+        description="Origin channel. One of: app, sms, call_center, merchant_portal.",
+    )
+    locale: Optional[str] = Field(
+        default=None,
+        description="Message locale. One of: bn, en, mixed.",
     )
     message: str = Field(
         ...,
